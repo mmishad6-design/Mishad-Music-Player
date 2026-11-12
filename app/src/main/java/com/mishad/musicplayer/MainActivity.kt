@@ -1,6 +1,7 @@
 package com.mishad.musicplayer
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.ContentUris
 import android.content.pm.PackageManager
 import android.os.Build
@@ -31,17 +32,28 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
+import com.google.common.util.concurrent.ListenableFuture
 
 data class AudioTrack(val id: Long, val title: String, val artist: String, val uri: android.net.Uri)
 
 class MainActivity : ComponentActivity() {
     private var tracks by mutableStateOf<List<AudioTrack>>(emptyList())
     private var permissionGranted by mutableStateOf(false)
-    private lateinit var player: ExoPlayer
+    private var controller by mutableStateOf<MediaController?>(null)
     private var currentIndex by mutableIntStateOf(-1)
     private var isPlaying by mutableStateOf(false)
+    private var controllerFuture: ListenableFuture<MediaController>? = null
+
+    private val playerListener = object : Player.Listener {
+        override fun onIsPlayingChanged(playing: Boolean) { isPlaying = playing }
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            currentIndex = controller?.currentMediaItemIndex ?: -1
+        }
+    }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -52,17 +64,24 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        player = ExoPlayer.Builder(this).build()
-        player.addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(playing: Boolean) { isPlaying = playing }
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                currentIndex = player.currentMediaItemIndex
-            }
-        })
         val permission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO
             else Manifest.permission.READ_EXTERNAL_STORAGE
         permissionGranted = ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
         if (permissionGranted) loadTracks()
+
+        val token = SessionToken(this, ComponentName(this, MusicPlaybackService::class.java))
+        controllerFuture = MediaController.Builder(this, token).buildAsync()
+        controllerFuture?.addListener({
+            try {
+                controller = controllerFuture?.get()
+                controller?.addListener(playerListener)
+                isPlaying = controller?.isPlaying == true
+                currentIndex = controller?.currentMediaItemIndex ?: -1
+            } catch (_: Exception) {
+                controller = null
+            }
+        }, mainExecutor)
+
         setContent {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize(), color = Color(0xFF101116)) {
@@ -73,9 +92,11 @@ class MainActivity : ComponentActivity() {
                         isPlaying = isPlaying,
                         onGrantPermission = { permissionLauncher.launch(permission) },
                         onPlayTrack = { index -> playTrack(index) },
-                        onTogglePlayback = { if (player.isPlaying) player.pause() else player.play() },
-                        onPrevious = { if (player.hasPreviousMediaItem()) player.seekToPreviousMediaItem() },
-                        onNext = { if (player.hasNextMediaItem()) player.seekToNextMediaItem() }
+                        onTogglePlayback = {
+                            controller?.let { if (it.isPlaying) it.pause() else it.play() }
+                        },
+                        onPrevious = { controller?.seekToPreviousMediaItem() },
+                        onNext = { controller?.seekToNextMediaItem() }
                     )
                 }
             }
@@ -83,11 +104,23 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun playTrack(index: Int) {
+        val player = controller ?: return
         if (index !in tracks.indices) return
-        currentIndex = index
-        player.setMediaItems(tracks.map { MediaItem.fromUri(it.uri) }, index, 0L)
+        val items = tracks.map { track ->
+            MediaItem.Builder()
+                .setUri(track.uri)
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setTitle(track.title)
+                        .setArtist(track.artist)
+                        .build()
+                )
+                .build()
+        }
+        player.setMediaItems(items, index, 0L)
         player.prepare()
         player.play()
+        currentIndex = index
     }
 
     private fun loadTracks() {
@@ -113,7 +146,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        player.release()
+        controller?.removeListener(playerListener)
+        controllerFuture?.let { MediaController.releaseFuture(it) }
+        controller = null
         super.onDestroy()
     }
 }
