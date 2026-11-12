@@ -1,0 +1,51 @@
+name: Publish Android Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Release tag (for example v1.0.0)
+        required: true
+        default: v1.0.0
+      release_name:
+        description: Public release title
+        required: true
+        default: Mishad Music Player v1.0.0
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build release APK
+        run: gradle assembleDebug
+
+      - name: Publish public GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag_name }}
+          RELEASE_NAME: ${{ inputs.release_name }}
+        run: |
+          gh release create "$TAG_NAME" app/build/outputs/apk/debug/app-debug.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --target main \
+            --title "$RELEASE_NAME" \
+            --notes "First public test release of Mishad Music Player. Download app-debug.apk and install it on an Android device. This is an unsigned debug build intended for testing."
